@@ -1,0 +1,31 @@
+---
+galaxy_info:
+  author: Ansible Bootstrap
+  description: LUKS disk encryption role for server bootstrap
+  company: ""
+  license: MIT
+  min_ansible_version: 2.13
+  platforms:
+    - name: Ubuntu
+      versions:
+        - 18.04
+        - 20.04
+        - 22.04
+    - name: Debian
+      versions:
+        - 10
+        - 11
+        - 12
+    - name: EL
+      versions:
+        - 7
+        - 8
+        - 9
+  galaxy_tags:
+    - security
+    - encryption
+    - luks
+    - disk
+    - bootstrap
+
+dependencies: []

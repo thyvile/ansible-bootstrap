@@ -1,0 +1,26 @@
+---
+- name: reload udev rules
+  shell: |
+    udevadm control --reload-rules
+    udevadm trigger
+
+- name: regenerate netplan
+  shell: netplan generate
+  when: ansible_distribution == "Ubuntu" and ansible_distribution_major_version | int >= 18
+
+- name: restart networking
+  service:
+    name: networking
+    state: restarted
+  when: ansible_os_family == "Debian"
+
+- name: restart NetworkManager
+  service:
+    name: NetworkManager
+    state: restarted
+  when: ansible_os_family == "RedHat"
+
+- name: reboot required
+  shell: |
+    touch /var/run/reboot-required
+    echo "Network interface renaming requires a reboot to take effect"

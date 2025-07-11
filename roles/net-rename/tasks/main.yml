@@ -1,0 +1,218 @@
+---
+- name: Gather network interface information
+  setup:
+    gather_subset:
+      - network
+
+- name: Find the active network interface
+  set_fact:
+    active_interface: "{{ ansible_default_ipv4.interface }}"
+  when: ansible_default_ipv4.interface is defined
+
+- name: Validate active interface exists
+  fail:
+    msg: "No active network interface found with default route"
+  when: active_interface is not defined or active_interface == ""
+
+- name: Check if interface is already named net0
+  debug:
+    msg: "Interface {{ active_interface }} is already named net0"
+  when: active_interface == "net0"
+
+- name: Perform network interface renaming
+  block:
+    - name: Get MAC address of active interface
+      slurp:
+        src: "/sys/class/net/{{ active_interface }}/address"
+      register: interface_mac_raw
+
+    - name: Set MAC address fact
+      set_fact:
+        interface_mac: "{{ interface_mac_raw.content | b64decode | trim }}"
+
+    - name: Get current interface information
+      set_fact:
+        interface_info: "{{ ansible_facts[active_interface] }}"
+
+    - name: Create udev rule for interface renaming
+      copy:
+        content: |
+          # Rename network interface to net0
+          SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ interface_mac }}", ATTR{dev_id}=="0x0", ATTR{type}=="1", NAME="net0"
+        dest: /etc/udev/rules.d/70-persistent-net.rules
+        backup: yes
+        mode: '0644'
+      register: udev_rule_created
+
+    - name: Update netplan configuration (Ubuntu 18.04+)
+      block:
+        - name: Find netplan configuration files
+          find:
+            paths: /etc/netplan/
+            patterns: "*.yaml"
+          register: netplan_files
+
+        - name: Update netplan configuration
+          replace:
+            path: "{{ item.path }}"
+            regexp: "{{ active_interface }}"
+            replace: "net0"
+            backup: yes
+          loop: "{{ netplan_files.files }}"
+          when: netplan_files.files | length > 0
+          register: netplan_updated
+
+        - name: Generate netplan configuration
+          command: netplan generate
+          when: netplan_updated.changed
+
+      when:
+        - ansible_distribution == "Ubuntu"
+        - ansible_distribution_major_version | int >= 18
+
+    - name: Update network interfaces (Debian/older Ubuntu)
+      block:
+        - name: Check if /etc/network/interfaces exists
+          stat:
+            path: /etc/network/interfaces
+          register: interfaces_file
+
+        - name: Update /etc/network/interfaces
+          replace:
+            path: /etc/network/interfaces
+            regexp: "{{ active_interface }}"
+            replace: "net0"
+            backup: yes
+          when: interfaces_file.stat.exists
+
+      when:
+        - ansible_os_family == "Debian"
+        - not (ansible_distribution == "Ubuntu" and ansible_distribution_major_version | int >= 18)
+
+    - name: Update NetworkManager configuration (RedHat)
+      block:
+        - name: Find NetworkManager connection files
+          find:
+            paths: /etc/NetworkManager/system-connections/
+            patterns: "*.nmconnection"
+          register: nm_files
+
+        - name: Update NetworkManager connections
+          replace:
+            path: "{{ item.path }}"
+            regexp: "interface-name={{ active_interface }}"
+            replace: "interface-name=net0"
+            backup: yes
+          loop: "{{ nm_files.files }}"
+          when: nm_files.files | length > 0
+
+        - name: Find NetworkManager ifcfg files
+          find:
+            paths: /etc/sysconfig/network-scripts/
+            patterns: "ifcfg-{{ active_interface }}"
+          register: ifcfg_files
+
+        - name: Rename ifcfg files
+          copy:
+            src: "{{ item.path }}"
+            dest: "/etc/sysconfig/network-scripts/ifcfg-net0"
+            remote_src: yes
+            backup: yes
+          loop: "{{ ifcfg_files.files }}"
+          when: ifcfg_files.files | length > 0
+          register: ifcfg_copied
+
+        - name: Remove old ifcfg files
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ ifcfg_files.files }}"
+          when: 
+            - ifcfg_files.files | length > 0
+            - ifcfg_copied.changed
+
+        - name: Update DEVICE name in ifcfg file
+          replace:
+            path: /etc/sysconfig/network-scripts/ifcfg-net0
+            regexp: "DEVICE={{ active_interface }}"
+            replace: "DEVICE=net0"
+            backup: yes
+          when: ifcfg_files.files | length > 0
+
+      when: ansible_os_family == "RedHat"
+
+    - name: Reload udev rules
+      systemd:
+        name: systemd-udev-trigger
+        state: restarted
+      register: udev_reload
+
+    - name: Alternative udev reload for non-systemd systems
+      command: "{{ item }}"
+      loop:
+        - udevadm control --reload-rules
+        - udevadm trigger
+      when: ansible_service_mgr != "systemd"
+
+    - name: Create reboot required flag
+      file:
+        path: /var/run/reboot-required
+        state: touch
+        mode: '0644'
+      when: udev_rule_created.changed
+
+    - name: Display interface renaming information
+      debug:
+        msg: |
+          Network Interface Renaming Configuration Complete!
+
+          == Original Interface ==
+          Name: {{ active_interface }}
+          MAC: {{ interface_mac }}
+
+          == New Configuration ==
+          Name: net0
+          MAC: {{ interface_mac }}
+
+          == Current Interface Details ==
+          Device: {{ interface_info.device }}
+          IPv4: {{ interface_info.ipv4.address | default('N/A') }}
+          Status: {{ interface_info.active | default('N/A') }}
+          Type: {{ interface_info.type | default('N/A') }}
+
+          == Actions Taken ==
+          - Created udev rule: /etc/udev/rules.d/70-persistent-net.rules
+          - Updated network configuration files
+          - Reloaded udev rules
+
+          == Important ==
+          A reboot is required to apply the interface name change.
+          After reboot, the interface will be available as 'net0'
+
+  when: active_interface != "net0"
+
+- name: Display current interface status (if already net0)
+  block:
+    - name: Get net0 interface information from facts
+      set_fact:
+        net0_info: "{{ ansible_facts['net0'] }}"
+      when: "'net0' in ansible_facts"
+
+    - name: Display net0 interface details
+      debug:
+        msg: |
+          Network Interface Status (Already net0):
+
+          == Interface Details ==
+          Device: {{ net0_info.device | default('net0') }}
+          IPv4: {{ net0_info.ipv4.address | default('N/A') }}
+          Status: {{ net0_info.active | default('N/A') }}
+          Type: {{ net0_info.type | default('N/A') }}
+          MAC: {{ net0_info.macaddress | default('N/A') }}
+
+          == Status ==
+          Interface is already named 'net0' - no changes needed.
+
+      when: "'net0' in ansible_facts"
+
+  when: active_interface == "net0"

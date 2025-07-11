@@ -1,0 +1,7 @@
+---
+# Default encryption settings
+luks_cipher: "aes-xts-plain64"
+luks_key_size: "256"
+luks_hash: "sha256"
+luks_name: "encrypted_disk"
+luks_filesystem: "ext4"

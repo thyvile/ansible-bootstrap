@@ -1,0 +1,13 @@
+---
+# Network interface renaming settings
+target_interface_name: "net0"
+
+# Udev rule settings
+udev_rule_file: "/etc/udev/rules.d/70-persistent-net.rules"
+udev_rule_priority: 70
+
+# Network configuration paths
+netplan_config_path: "/etc/netplan/"
+network_interfaces_path: "/etc/network/interfaces"
+networkmanager_connections_path: "/etc/NetworkManager/system-connections/"
+ifcfg_scripts_path: "/etc/sysconfig/network-scripts/"

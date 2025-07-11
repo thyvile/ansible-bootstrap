@@ -1,0 +1,56 @@
+---
+- name: Disable C-states and Set CPU Performance Mode
+  block:
+    - name: Check if system is virtualized
+      ansible.builtin.set_fact:
+        is_vm: "{{ ansible_virtualization_role == 'guest' }}"
+
+    - name: Display system type
+      ansible.builtin.debug:
+        msg: "System is {{ 'a VM' if is_vm else 'bare metal' }}"
+
+    # For VMs - these features are not available
+    - name: VM limitation notice
+      ansible.builtin.debug:
+        msg: "VMs do not have access to C-states or CPU frequency governors. These are controlled by the hypervisor."
+      when: is_vm
+
+    # For bare metal systems only
+    - name: Check if CPU frequency scaling is available
+      ansible.builtin.stat:
+        path: /sys/devices/system/cpu/cpu0/cpufreq
+      register: cpufreq_available
+      when: not is_vm
+
+    # Task 1: Disable C-states (bare metal only)
+    - name: Configure GRUB to disable C-states
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_idle.max_cstate=0 processor.max_cstate=0"'
+        backup: yes
+      notify: update grub
+      when: not is_vm
+
+    # Task 2: Switch CPU to performance mode (bare metal only)
+    - name: Install cpufrequtils package
+      ansible.builtin.apt:
+        name: cpufrequtils
+        state: present
+        update_cache: yes
+      when: not is_vm and cpufreq_available.stat.exists
+
+    - name: Set CPU frequency governor to performance
+      ansible.builtin.copy:
+        content: "performance"
+        dest: "/sys/devices/system/cpu/cpu{{ item }}/cpufreq/scaling_governor"
+      with_sequence: start=0 end={{ ansible_processor_vcpus - 1 }}
+      when: not is_vm and cpufreq_available.stat.exists
+
+    - name: Make governor setting persistent
+      ansible.builtin.copy:
+        content: |
+          GOVERNOR="performance"
+        dest: /etc/default/cpufrequtils
+        mode: '0644'
+      when: not is_vm and cpufreq_available.stat.exists

@@ -1,0 +1,148 @@
+---
+- name: Validate encryption parameters
+  block:
+    - name: Ensure either encrypt_partition or encrypt_disk is defined
+      fail:
+        msg: "Either 'encrypt_partition' or 'encrypt_disk' must be defined for {{ inventory_hostname }}"
+      when: 
+        - encrypt_partition is not defined
+        - encrypt_disk is not defined
+
+    - name: Ensure only one encryption target is defined
+      fail:
+        msg: "Only one of 'encrypt_partition' or 'encrypt_disk' should be defined, not both"
+      when: 
+        - encrypt_partition is defined
+        - encrypt_disk is defined
+
+    - name: Validate encrypt_partition is not root or boot
+      fail:
+        msg: "encrypt_partition cannot be '/' or '/boot' - these partitions cannot be encrypted while the system is running"
+      when:
+        - encrypt_partition is defined
+        - encrypt_partition in ['/', '/boot']
+
+    - name: Validate encrypted device partition path is defined
+      fail:
+        msg: "encrypted_partition_path is not defined - please define encrypted_partition_path in the inventory"
+      when:
+        - encrypted_partition_path is not defined
+
+    - name: Set encryption target variable
+      set_fact:
+        encryption_target: "{{ encrypt_partition | default(encrypt_disk) }}"
+
+- name: Get mount point from device path
+  set_fact:
+    mount_point: "{{ ansible_mounts | selectattr('device', 'equalto', encryption_target) | map(attribute='mount') | first | default('') }}"
+  when: encrypt_partition is defined
+
+- name: Unmount encrypted partition if defined
+  ansible.posix.mount:
+    path: "{{ mount_point }}"
+    state: unmounted
+  when: encrypt_partition is defined
+
+- name: Verify encryption target exists
+  stat:
+    path: "{{ encryption_target }}"
+  register: encryption_target_stat
+
+- name: Fail if encryption target does not exist
+  fail:
+    msg: "Encryption target {{ encryption_target }} does not exist on {{ inventory_hostname }}"
+  when: not encryption_target_stat.stat.exists
+
+- name: Perform encryption setup
+  block:
+    - name: Check if target is mounted
+      ansible.posix.mount:
+        path: "{{ encryption_target }}"
+        state: absent
+      register: mount_check
+      failed_when: false
+      changed_when: false
+      check_mode: true
+
+    - name: Fail if target is currently mounted
+      fail:
+        msg: "{{ encryption_target }} is currently mounted. Please unmount before encryption."
+      when: mount_check.changed
+
+    - name: Install required packages for encryption
+      package:
+        name:
+          - cryptsetup
+          - cryptsetup-bin
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages for encryption (RedHat)
+      package:
+        name:
+          - cryptsetup
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Setup LUKS encryption
+      community.crypto.luks_device:
+        device: "{{ encryption_target }}"
+        state: present
+        passphrase: "{{ luks_passphrase }}"
+        cipher: "{{ luks_cipher }}"
+        keysize: "{{ luks_key_size }}"
+        hash: "{{ luks_hash }}"
+      register: luks_format_result
+
+    - name: Open LUKS container
+      community.crypto.luks_device:
+        device: "{{ encryption_target }}"
+        state: opened
+        name: "{{ luks_name }}"
+        passphrase: "{{ luks_passphrase }}"
+      register: luks_open_result
+
+    - name: Create filesystem on encrypted container
+      filesystem:
+        fstype: "{{ luks_filesystem }}"
+        dev: "/dev/mapper/{{ luks_name }}"
+
+    - name: Create mount point
+      file:
+        path: "{{ encrypted_partition_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount encrypted filesystem
+      mount:
+        path: "{{ encrypted_partition_path }}"
+        src: "/dev/mapper/{{ luks_name }}"
+        fstype: "{{ luks_filesystem }}"
+        state: mounted
+
+    - name: Display encryption completion
+      debug:
+        msg: |
+          LUKS encryption completed successfully!
+          - Target: {{ encryption_target }}
+          - Container: {{ luks_name }}
+          - Mount point: {{ encrypted_partition_path }}
+          - Filesystem: {{ luks_filesystem  }}
+
+  rescue:
+    - name: Clean up on failure
+      community.crypto.luks_device:
+        device: "{{ encryption_target }}"
+        state: closed
+        name: "{{ luks_name | default('encrypted_disk') }}"
+      failed_when: false
+
+    - name: Fail with detailed error message
+      fail:
+        msg: |
+          Encryption setup failed for {{ encryption_target }}
+          Error details available in Ansible logs
+          Please check:
+          - Target device exists and is not mounted
+          - Sufficient permissions
+          - Required packages are installed

@@ -1,0 +1,7 @@
+---
+# CPU Governor settings
+cpu_governor: "performance"
+
+# C-state settings
+disable_cstates: true
+disable_cstates_grub: false
